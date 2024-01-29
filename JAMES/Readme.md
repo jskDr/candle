@@ -33,3 +33,13 @@ $ cargo run --example mnist-training -- mlp --epochs 5
 $ cargo run --example mnist-training -- cnn --epochs 5
 $ cargo run --example mnist-training --features cuda -- cnn --epochs 5
 ```
+
+### MNIST-James (model: linear, mlp, cnn)
+For release mode, specify `--release` option.
+```bash
+$ cargo run --example mnist-training-james -- linear --epochs 10
+$ cargo run --example mnist-training-james -- mlp --epochs 5
+$ cargo run --example mnist-training-james -- cnn --epochs 5
+$ cargo run --example mnist-training-james --release -- cnn  --epochs 5
+$ cargo run --example mnist-training-james --features cuda -- cnn --epochs 5
+```
