@@ -1,5 +1,5 @@
-use candle_core::quantized::{gguf_file, k_quants, QTensor};
-use candle_core::{Device, Result, Tensor};
+use candle::quantized::{gguf_file, GgmlDType, QTensor};
+use candle::{Device, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
@@ -11,12 +11,7 @@ enum QuantizationMode {
 }
 
 impl QuantizationMode {
-    fn quantize(
-        &self,
-        name: &str,
-        tensor: QTensor,
-        default: fn(&Tensor) -> Result<QTensor>,
-    ) -> Result<QTensor> {
+    fn quantize(&self, name: &str, tensor: QTensor, dtype: GgmlDType) -> Result<QTensor> {
         match self {
             Self::Llama => {
                 // Same behavior as the llama.cpp quantization.
@@ -24,9 +19,9 @@ impl QuantizationMode {
                 if should_quantize {
                     let tensor = tensor.dequantize(&Device::Cpu)?;
                     if name == "output.weight" {
-                        QTensor::quantize::<k_quants::BlockQ6K>(&tensor)
+                        QTensor::quantize(&tensor, GgmlDType::Q6K)
                     } else {
-                        default(&tensor)
+                        QTensor::quantize(&tensor, dtype)
                     }
                 } else {
                     Ok(tensor)
@@ -58,6 +53,27 @@ enum Quantization {
     Q8k,
     F16,
     F32,
+}
+
+impl Quantization {
+    fn dtype(&self) -> GgmlDType {
+        match self {
+            Quantization::Q4_0 => GgmlDType::Q4_0,
+            Quantization::Q4_1 => GgmlDType::Q4_1,
+            Quantization::Q5_0 => GgmlDType::Q5_0,
+            Quantization::Q5_1 => GgmlDType::Q5_1,
+            Quantization::Q8_0 => GgmlDType::Q8_0,
+            Quantization::Q8_1 => GgmlDType::Q8_1,
+            Quantization::Q2k => GgmlDType::Q2K,
+            Quantization::Q3k => GgmlDType::Q3K,
+            Quantization::Q4k => GgmlDType::Q4K,
+            Quantization::Q5k => GgmlDType::Q5K,
+            Quantization::Q6k => GgmlDType::Q6K,
+            Quantization::Q8k => GgmlDType::Q8K,
+            Quantization::F16 => GgmlDType::F16,
+            Quantization::F32 => GgmlDType::F32,
+        }
+    }
 }
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -101,6 +117,24 @@ enum Command {
         verbose: bool,
     },
 
+    Print {
+        file: std::path::PathBuf,
+
+        names: Vec<String>,
+
+        /// The file format to use, if unspecified infer from the file extension.
+        #[arg(long, value_enum)]
+        format: Option<Format>,
+
+        /// Print the whole content of each tensor.
+        #[arg(long)]
+        full: bool,
+
+        /// Line width for printing the tensors.
+        #[arg(long)]
+        line_width: Option<usize>,
+    },
+
     Quantize {
         /// The input file(s), in safetensors format.
         in_file: Vec<std::path::PathBuf>,
@@ -134,7 +168,20 @@ struct Args {
     command: Command,
 }
 
-fn run_ls(file: &std::path::PathBuf, format: Option<Format>, verbose: bool) -> Result<()> {
+fn run_print(
+    file: &std::path::PathBuf,
+    names: Vec<String>,
+    format: Option<Format>,
+    full: bool,
+    line_width: Option<usize>,
+    device: &Device,
+) -> Result<()> {
+    if full {
+        candle::display::set_print_options_full();
+    }
+    if let Some(line_width) = line_width {
+        candle::display::set_line_width(line_width)
+    }
     let format = match format {
         Some(format) => format,
         None => match Format::infer(file) {
@@ -149,7 +196,98 @@ fn run_ls(file: &std::path::PathBuf, format: Option<Format>, verbose: bool) -> R
     };
     match format {
         Format::Npz => {
-            let tensors = candle_core::npy::NpzTensors::new(file)?;
+            let tensors = candle::npy::NpzTensors::new(file)?;
+            for name in names.iter() {
+                println!("==== {name} ====");
+                match tensors.get(name)? {
+                    Some(tensor) => println!("{tensor}"),
+                    None => println!("not found"),
+                }
+            }
+        }
+        Format::Safetensors => {
+            use candle::safetensors::Load;
+            let tensors = unsafe { candle::safetensors::MmapedSafetensors::new(file)? };
+            let tensors: std::collections::HashMap<_, _> = tensors.tensors().into_iter().collect();
+            for name in names.iter() {
+                println!("==== {name} ====");
+                match tensors.get(name) {
+                    Some(tensor_view) => {
+                        let tensor = tensor_view.load(device)?;
+                        println!("{tensor}")
+                    }
+                    None => println!("not found"),
+                }
+            }
+        }
+        Format::Pth => {
+            let pth_file = candle::pickle::PthTensors::new(file, None)?;
+            for name in names.iter() {
+                println!("==== {name} ====");
+                match pth_file.get(name)? {
+                    Some(tensor) => {
+                        println!("{tensor}")
+                    }
+                    None => println!("not found"),
+                }
+            }
+        }
+        Format::Pickle => {
+            candle::bail!("pickle format is not supported for print")
+        }
+        Format::Ggml => {
+            let mut file = std::fs::File::open(file)?;
+            let content = candle::quantized::ggml_file::Content::read(&mut file, device)?;
+            for name in names.iter() {
+                println!("==== {name} ====");
+                match content.tensors.get(name) {
+                    Some(tensor) => {
+                        let tensor = tensor.dequantize(device)?;
+                        println!("{tensor}")
+                    }
+                    None => println!("not found"),
+                }
+            }
+        }
+        Format::Gguf => {
+            let mut file = std::fs::File::open(file)?;
+            let content = gguf_file::Content::read(&mut file)?;
+            for name in names.iter() {
+                println!("==== {name} ====");
+                match content.tensor(&mut file, name, device) {
+                    Ok(tensor) => {
+                        let tensor = tensor.dequantize(device)?;
+                        println!("{tensor}")
+                    }
+                    Err(_) => println!("not found"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_ls(
+    file: &std::path::PathBuf,
+    format: Option<Format>,
+    verbose: bool,
+    device: &Device,
+) -> Result<()> {
+    let format = match format {
+        Some(format) => format,
+        None => match Format::infer(file) {
+            Some(format) => format,
+            None => {
+                println!(
+                    "{file:?}: cannot infer format from file extension, use the --format flag"
+                );
+                return Ok(());
+            }
+        },
+    };
+    match format {
+        Format::Npz => {
+            let tensors = candle::npy::NpzTensors::new(file)?;
             let mut names = tensors.names();
             names.sort();
             for name in names {
@@ -161,12 +299,12 @@ fn run_ls(file: &std::path::PathBuf, format: Option<Format>, verbose: bool) -> R
             }
         }
         Format::Safetensors => {
-            let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::new(file)? };
+            let tensors = unsafe { candle::safetensors::MmapedSafetensors::new(file)? };
             let mut tensors = tensors.tensors();
             tensors.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, view) in tensors.iter() {
                 let dtype = view.dtype();
-                let dtype = match candle_core::DType::try_from(dtype) {
+                let dtype = match candle::DType::try_from(dtype) {
                     Ok(dtype) => format!("{dtype:?}"),
                     Err(_) => format!("{dtype:?}"),
                 };
@@ -175,7 +313,7 @@ fn run_ls(file: &std::path::PathBuf, format: Option<Format>, verbose: bool) -> R
             }
         }
         Format::Pth => {
-            let mut tensors = candle_core::pickle::read_pth_tensor_info(file, verbose)?;
+            let mut tensors = candle::pickle::read_pth_tensor_info(file, verbose, None)?;
             tensors.sort_by(|a, b| a.name.cmp(&b.name));
             for tensor_info in tensors.iter() {
                 println!(
@@ -192,7 +330,7 @@ fn run_ls(file: &std::path::PathBuf, format: Option<Format>, verbose: bool) -> R
         Format::Pickle => {
             let file = std::fs::File::open(file)?;
             let mut reader = std::io::BufReader::new(file);
-            let mut stack = candle_core::pickle::Stack::empty();
+            let mut stack = candle::pickle::Stack::empty();
             stack.read_loop(&mut reader)?;
             for (i, obj) in stack.stack().iter().enumerate() {
                 println!("{i} {obj:?}");
@@ -200,7 +338,7 @@ fn run_ls(file: &std::path::PathBuf, format: Option<Format>, verbose: bool) -> R
         }
         Format::Ggml => {
             let mut file = std::fs::File::open(file)?;
-            let content = candle_core::quantized::ggml_file::Content::read(&mut file)?;
+            let content = candle::quantized::ggml_file::Content::read(&mut file, device)?;
             let mut tensors = content.tensors.into_iter().collect::<Vec<_>>();
             tensors.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, qtensor) in tensors.iter() {
@@ -236,42 +374,13 @@ fn run_quantize_safetensors(
     let mut out_file = std::fs::File::create(out_file)?;
     let mut tensors = std::collections::HashMap::new();
     for in_file in in_files.iter() {
-        let in_tensors = candle_core::safetensors::load(in_file, &Device::Cpu)?;
+        let in_tensors = candle::safetensors::load(in_file, &Device::Cpu)?;
         tensors.extend(in_tensors)
     }
     println!("tensors: {}", tensors.len());
 
-    let quantize_fn = match q {
-        Quantization::Q4_0 => QTensor::quantize::<k_quants::BlockQ4_0>,
-        Quantization::Q4_1 => QTensor::quantize::<k_quants::BlockQ4_1>,
-        Quantization::Q5_0 => QTensor::quantize::<k_quants::BlockQ5_0>,
-        Quantization::Q5_1 => QTensor::quantize::<k_quants::BlockQ5_1>,
-        Quantization::Q8_0 => QTensor::quantize::<k_quants::BlockQ8_0>,
-        Quantization::Q8_1 => QTensor::quantize::<k_quants::BlockQ8_1>,
-        Quantization::Q2k => QTensor::quantize::<k_quants::BlockQ2K>,
-        Quantization::Q3k => QTensor::quantize::<k_quants::BlockQ3K>,
-        Quantization::Q4k => QTensor::quantize::<k_quants::BlockQ4K>,
-        Quantization::Q5k => QTensor::quantize::<k_quants::BlockQ5K>,
-        Quantization::Q6k => QTensor::quantize::<k_quants::BlockQ6K>,
-        Quantization::Q8k => QTensor::quantize::<k_quants::BlockQ8K>,
-        Quantization::F16 => QTensor::quantize::<half::f16>,
-        Quantization::F32 => QTensor::quantize::<f32>,
-    };
-    let block_size = match q {
-        Quantization::Q4_0 => k_quants::QK4_0,
-        Quantization::Q4_1 => k_quants::QK4_1,
-        Quantization::Q5_0 => k_quants::QK5_0,
-        Quantization::Q5_1 => k_quants::QK5_1,
-        Quantization::Q8_0 => k_quants::QK8_0,
-        Quantization::Q8_1 => k_quants::QK8_1,
-        Quantization::Q2k
-        | Quantization::Q3k
-        | Quantization::Q4k
-        | Quantization::Q5k
-        | Quantization::Q6k
-        | Quantization::Q8k => k_quants::QK_K,
-        Quantization::F16 | Quantization::F32 => 1,
-    };
+    let dtype = q.dtype();
+    let block_size = dtype.block_size();
 
     let qtensors = tensors
         .into_par_iter()
@@ -279,9 +388,9 @@ fn run_quantize_safetensors(
             let should_quantize = tensor.rank() == 2 && tensor.dim(1)? % block_size == 0;
             println!("  quantizing {name} {tensor:?} {should_quantize}");
             let tensor = if should_quantize {
-                quantize_fn(&tensor)?
+                QTensor::quantize(&tensor, dtype)?
             } else {
-                QTensor::quantize::<f32>(&tensor)?
+                QTensor::quantize(&tensor, GgmlDType::F32)?
             };
             Ok((name, tensor))
         })
@@ -294,16 +403,20 @@ fn run_quantize_safetensors(
     Ok(())
 }
 
-fn run_dequantize(in_file: std::path::PathBuf, out_file: std::path::PathBuf) -> Result<()> {
+fn run_dequantize(
+    in_file: std::path::PathBuf,
+    out_file: std::path::PathBuf,
+    device: &Device,
+) -> Result<()> {
     let mut in_file = std::fs::File::open(in_file)?;
     let content = gguf_file::Content::read(&mut in_file)?;
     let mut tensors = std::collections::HashMap::new();
     for (tensor_name, _) in content.tensor_infos.iter() {
-        let tensor = content.tensor(&mut in_file, tensor_name)?;
-        let tensor = tensor.dequantize(&Device::Cpu)?;
+        let tensor = content.tensor(&mut in_file, tensor_name, device)?;
+        let tensor = tensor.dequantize(device)?;
         tensors.insert(tensor_name.to_string(), tensor);
     }
-    candle_core::safetensors::save(&tensors, out_file)?;
+    candle::safetensors::save(&tensors, out_file)?;
     Ok(())
 }
 
@@ -312,13 +425,14 @@ fn run_quantize(
     out_file: std::path::PathBuf,
     q: Quantization,
     qmode: QuantizationMode,
+    device: &Device,
 ) -> Result<()> {
     if in_files.is_empty() {
-        candle_core::bail!("no specified input files")
+        candle::bail!("no specified input files")
     }
     if let Some(extension) = out_file.extension() {
         if extension == "safetensors" {
-            candle_core::bail!("the generated file cannot use the safetensors extension")
+            candle::bail!("the generated file cannot use the safetensors extension")
         }
     }
     if let Some(extension) = in_files[0].extension() {
@@ -328,7 +442,7 @@ fn run_quantize(
     }
 
     if in_files.len() != 1 {
-        candle_core::bail!("only a single in-file can be used when quantizing gguf files")
+        candle::bail!("only a single in-file can be used when quantizing gguf files")
     }
 
     // Open the out file early so as to fail directly on missing directories etc.
@@ -337,31 +451,15 @@ fn run_quantize(
     let content = gguf_file::Content::read(&mut in_)?;
     println!("tensors: {}", content.tensor_infos.len());
 
-    let quantize_fn = match q {
-        Quantization::Q4_0 => QTensor::quantize::<k_quants::BlockQ4_0>,
-        Quantization::Q4_1 => QTensor::quantize::<k_quants::BlockQ4_1>,
-        Quantization::Q5_0 => QTensor::quantize::<k_quants::BlockQ5_0>,
-        Quantization::Q5_1 => QTensor::quantize::<k_quants::BlockQ5_1>,
-        Quantization::Q8_0 => QTensor::quantize::<k_quants::BlockQ8_0>,
-        Quantization::Q8_1 => QTensor::quantize::<k_quants::BlockQ8_1>,
-        Quantization::Q2k => QTensor::quantize::<k_quants::BlockQ2K>,
-        Quantization::Q3k => QTensor::quantize::<k_quants::BlockQ3K>,
-        Quantization::Q4k => QTensor::quantize::<k_quants::BlockQ4K>,
-        Quantization::Q5k => QTensor::quantize::<k_quants::BlockQ5K>,
-        Quantization::Q6k => QTensor::quantize::<k_quants::BlockQ6K>,
-        Quantization::Q8k => QTensor::quantize::<k_quants::BlockQ8K>,
-        Quantization::F16 => QTensor::quantize::<half::f16>,
-        Quantization::F32 => QTensor::quantize::<f32>,
-    };
-
+    let dtype = q.dtype();
     let qtensors = content
         .tensor_infos
         .par_iter()
         .map(|(name, _)| {
             println!("  quantizing {name}");
             let mut in_file = std::fs::File::open(&in_files[0])?;
-            let tensor = content.tensor(&mut in_file, name)?;
-            let tensor = qmode.quantize(name, tensor, quantize_fn)?;
+            let tensor = content.tensor(&mut in_file, name, device)?;
+            let tensor = qmode.quantize(name, tensor, dtype)?;
             Ok((name, tensor))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -381,6 +479,7 @@ fn run_quantize(
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let device = Device::Cpu;
     match args.command {
         Command::Ls {
             files,
@@ -392,16 +491,23 @@ fn main() -> anyhow::Result<()> {
                 if multiple_files {
                     println!("--- {file:?} ---");
                 }
-                run_ls(file, format.clone(), verbose)?
+                run_ls(file, format.clone(), verbose, &device)?
             }
         }
+        Command::Print {
+            file,
+            names,
+            format,
+            full,
+            line_width,
+        } => run_print(&file, names, format, full, line_width, &device)?,
         Command::Quantize {
             in_file,
             out_file,
             quantization,
             mode,
-        } => run_quantize(&in_file, out_file, quantization, mode)?,
-        Command::Dequantize { in_file, out_file } => run_dequantize(in_file, out_file)?,
+        } => run_quantize(&in_file, out_file, quantization, mode, &device)?,
+        Command::Dequantize { in_file, out_file } => run_dequantize(in_file, out_file, &device)?,
     }
     Ok(())
 }

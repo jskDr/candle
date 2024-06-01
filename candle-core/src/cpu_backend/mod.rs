@@ -4,7 +4,13 @@ use crate::{DType, Error, IntDType, Layout, Result, Shape, WithDType};
 use half::{bf16, f16};
 use rayon::prelude::*;
 
+mod utils;
+pub use utils::{
+    binary_map, binary_map_vec, unary_map, unary_map_vec, Map1, Map1Any, Map2, Map2U8,
+};
+
 const USE_IM2COL_CONV1D: bool = true;
+const USE_COL2IM_CONV1D_TR: bool = true;
 const USE_IM2COL_CONV2D: bool = true;
 
 // TODO: Maybe we should not implement [Clone] here and instead have an explicit allocator +
@@ -21,103 +27,18 @@ pub enum CpuStorage {
 }
 
 #[derive(Debug, Clone)]
+pub enum CpuStorageRef<'a> {
+    U8(&'a [u8]),
+    U32(&'a [u32]),
+    I64(&'a [i64]),
+    BF16(&'a [bf16]),
+    F16(&'a [f16]),
+    F32(&'a [f32]),
+    F64(&'a [f64]),
+}
+
+#[derive(Debug, Clone)]
 pub struct CpuDevice;
-
-pub trait Map1 {
-    fn f<T: WithDType>(&self, vs: &[T], layout: &Layout) -> Result<Vec<T>>;
-
-    fn map(&self, vs: &CpuStorage, layout: &Layout) -> Result<CpuStorage> {
-        match vs {
-            CpuStorage::U8(vs) => Ok(CpuStorage::U8(self.f(vs, layout)?)),
-            CpuStorage::U32(vs) => Ok(CpuStorage::U32(self.f(vs, layout)?)),
-            CpuStorage::I64(vs) => Ok(CpuStorage::I64(self.f(vs, layout)?)),
-            CpuStorage::BF16(vs) => Ok(CpuStorage::BF16(self.f(vs, layout)?)),
-            CpuStorage::F16(vs) => Ok(CpuStorage::F16(self.f(vs, layout)?)),
-            CpuStorage::F32(vs) => Ok(CpuStorage::F32(self.f(vs, layout)?)),
-            CpuStorage::F64(vs) => Ok(CpuStorage::F64(self.f(vs, layout)?)),
-        }
-    }
-}
-
-pub trait Map1Any {
-    fn f<T: WithDType, W: Fn(Vec<T>) -> CpuStorage>(
-        &self,
-        vs: &[T],
-        layout: &Layout,
-        wrap: W,
-    ) -> Result<CpuStorage>;
-
-    fn map(&self, vs: &CpuStorage, layout: &Layout) -> Result<CpuStorage> {
-        match vs {
-            CpuStorage::U8(vs) => Ok(self.f(vs, layout, CpuStorage::U8)?),
-            CpuStorage::U32(vs) => Ok(self.f(vs, layout, CpuStorage::U32)?),
-            CpuStorage::I64(vs) => Ok(self.f(vs, layout, CpuStorage::I64)?),
-            CpuStorage::BF16(vs) => Ok(self.f(vs, layout, CpuStorage::BF16)?),
-            CpuStorage::F16(vs) => Ok(self.f(vs, layout, CpuStorage::F16)?),
-            CpuStorage::F32(vs) => Ok(self.f(vs, layout, CpuStorage::F32)?),
-            CpuStorage::F64(vs) => Ok(self.f(vs, layout, CpuStorage::F64)?),
-        }
-    }
-}
-
-type C = CpuStorage;
-pub trait Map2 {
-    const OP: &'static str;
-    fn f<T: WithDType>(&self, v1: &[T], l1: &Layout, v2: &[T], l2: &Layout) -> Result<Vec<T>>;
-
-    fn map(
-        &self,
-        v1: &CpuStorage,
-        l1: &Layout,
-        v2: &CpuStorage,
-        l2: &Layout,
-    ) -> Result<CpuStorage> {
-        match (v1, v2) {
-            (C::U8(v1), C::U8(v2)) => Ok(C::U8(self.f(v1, l1, v2, l2)?)),
-            (C::U32(v1), C::U32(v2)) => Ok(C::U32(self.f(v1, l1, v2, l2)?)),
-            (C::I64(v1), C::I64(v2)) => Ok(C::I64(self.f(v1, l1, v2, l2)?)),
-            (C::BF16(v1), C::BF16(v2)) => Ok(C::BF16(self.f(v1, l1, v2, l2)?)),
-            (C::F16(v1), C::F16(v2)) => Ok(C::F16(self.f(v1, l1, v2, l2)?)),
-            (C::F32(v1), C::F32(v2)) => Ok(C::F32(self.f(v1, l1, v2, l2)?)),
-            (C::F64(v1), C::F64(v2)) => Ok(C::F64(self.f(v1, l1, v2, l2)?)),
-            _ => Err(Error::DTypeMismatchBinaryOp {
-                lhs: v1.dtype(),
-                rhs: v2.dtype(),
-                op: Self::OP,
-            }
-            .bt()),
-        }
-    }
-}
-
-pub trait Map2U8 {
-    const OP: &'static str;
-    fn f<T: WithDType>(&self, v1: &[T], l1: &Layout, v2: &[T], l2: &Layout) -> Result<Vec<u8>>;
-
-    fn map(
-        &self,
-        v1: &CpuStorage,
-        l1: &Layout,
-        v2: &CpuStorage,
-        l2: &Layout,
-    ) -> Result<CpuStorage> {
-        match (v1, v2) {
-            (C::U8(v1), C::U8(v2)) => Ok(C::U8(self.f(v1, l1, v2, l2)?)),
-            (C::U32(v1), C::U32(v2)) => Ok(C::U8(self.f(v1, l1, v2, l2)?)),
-            (C::I64(v1), C::I64(v2)) => Ok(C::U8(self.f(v1, l1, v2, l2)?)),
-            (C::BF16(v1), C::BF16(v2)) => Ok(C::U8(self.f(v1, l1, v2, l2)?)),
-            (C::F16(v1), C::F16(v2)) => Ok(C::U8(self.f(v1, l1, v2, l2)?)),
-            (C::F32(v1), C::F32(v2)) => Ok(C::U8(self.f(v1, l1, v2, l2)?)),
-            (C::F64(v1), C::F64(v2)) => Ok(C::U8(self.f(v1, l1, v2, l2)?)),
-            _ => Err(Error::DTypeMismatchBinaryOp {
-                lhs: v1.dtype(),
-                rhs: v2.dtype(),
-                op: Self::OP,
-            }
-            .bt()),
-        }
-    }
-}
 
 struct Cmp(CmpOp);
 impl Map2U8 for Cmp {
@@ -362,275 +283,6 @@ impl<'a> Map1 for ReduceSum<'a> {
     #[inline(always)]
     fn f<T: WithDType>(&self, src: &[T], src_l: &Layout) -> Result<Vec<T>> {
         self.fold_impl(src, src_l, T::zero())
-    }
-}
-
-pub fn unary_map<T: Copy, U: Copy, F: FnMut(T) -> U>(
-    vs: &[T],
-    layout: &Layout,
-    mut f: F,
-) -> Vec<U> {
-    match layout.strided_blocks() {
-        crate::StridedBlocks::SingleBlock { start_offset, len } => vs
-            [start_offset..start_offset + len]
-            .iter()
-            .map(|&v| f(v))
-            .collect(),
-        crate::StridedBlocks::MultipleBlocks {
-            block_start_index,
-            block_len,
-        } => {
-            let mut result = Vec::with_capacity(layout.shape().elem_count());
-            // Specialize the case where block_len is one to avoid the second loop.
-            if block_len == 1 {
-                for index in block_start_index {
-                    let v = unsafe { vs.get_unchecked(index) };
-                    result.push(f(*v))
-                }
-            } else {
-                for index in block_start_index {
-                    for offset in 0..block_len {
-                        let v = unsafe { vs.get_unchecked(index + offset) };
-                        result.push(f(*v))
-                    }
-                }
-            }
-            result
-        }
-    }
-}
-
-pub fn unary_map_vec<T: Copy, U: Copy, F: FnMut(T) -> U, FV: FnMut(&[T], &mut [U])>(
-    vs: &[T],
-    layout: &Layout,
-    mut f: F,
-    mut f_vec: FV,
-) -> Vec<U> {
-    match layout.strided_blocks() {
-        crate::StridedBlocks::SingleBlock { start_offset, len } => {
-            let mut ys: Vec<U> = Vec::with_capacity(len);
-            let ys_to_set = ys.spare_capacity_mut();
-            let ys_to_set = unsafe { std::mem::transmute::<_, &mut [U]>(ys_to_set) };
-            f_vec(&vs[start_offset..start_offset + len], ys_to_set);
-            // SAFETY: values are all set by f_vec.
-            unsafe { ys.set_len(len) };
-            ys
-        }
-        crate::StridedBlocks::MultipleBlocks {
-            block_start_index,
-            block_len,
-        } => {
-            let el_count = layout.shape().elem_count();
-            // Specialize the case where block_len is one to avoid the second loop.
-            if block_len == 1 {
-                let mut result = Vec::with_capacity(el_count);
-                for index in block_start_index {
-                    let v = unsafe { vs.get_unchecked(index) };
-                    result.push(f(*v))
-                }
-                result
-            } else {
-                let mut ys: Vec<U> = Vec::with_capacity(el_count);
-                let ys_to_set = ys.spare_capacity_mut();
-                let ys_to_set = unsafe { std::mem::transmute::<_, &mut [U]>(ys_to_set) };
-                let mut dst_index = 0;
-                for src_index in block_start_index {
-                    let vs = &vs[src_index..src_index + block_len];
-                    let ys = &mut ys_to_set[dst_index..dst_index + block_len];
-                    f_vec(vs, ys);
-                    dst_index += block_len;
-                }
-                // SAFETY: values are all set by f_vec.
-                unsafe { ys.set_len(el_count) };
-                ys
-            }
-        }
-    }
-}
-
-// This function maps over two strided index sequences.
-pub fn binary_map<T: Copy, U: Copy, F: FnMut(T, T) -> U>(
-    lhs_l: &Layout,
-    rhs_l: &Layout,
-    lhs: &[T],
-    rhs: &[T],
-    mut f: F,
-) -> Vec<U> {
-    match (lhs_l.contiguous_offsets(), rhs_l.contiguous_offsets()) {
-        (Some((o_l1, o_l2)), Some((o_r1, o_r2))) => lhs[o_l1..o_l2]
-            .iter()
-            .zip(rhs[o_r1..o_r2].iter())
-            .map(|(&l, &r)| f(l, r))
-            .collect(),
-        (Some((o_l1, o_l2)), None) => {
-            // TODO: Maybe we want to avoid going through the layout twice.
-            match rhs_l.offsets_b() {
-                Some(ob) => {
-                    let mut i_in_block = 0;
-                    let mut i_right_broadcast = 0;
-                    lhs[o_l1..o_l2]
-                        .iter()
-                        .map(|&l| {
-                            let r = unsafe { rhs.get_unchecked(i_in_block + ob.start) };
-                            i_right_broadcast += 1;
-                            if i_right_broadcast >= ob.right_broadcast {
-                                i_in_block += 1;
-                                i_right_broadcast = 0;
-                            }
-                            if i_in_block >= ob.len {
-                                i_in_block = 0
-                            }
-                            f(l, *r)
-                        })
-                        .collect()
-                }
-                None => lhs_l
-                    .strided_index()
-                    .zip(rhs_l.strided_index())
-                    .map(|(lhs_i, rhs_i)| f(lhs[lhs_i], rhs[rhs_i]))
-                    .collect(),
-            }
-        }
-        (None, Some((o_r1, o_r2))) => {
-            // TODO: Maybe we want to avoid going through the layout twice.
-            match lhs_l.offsets_b() {
-                Some(ob) => {
-                    let mut i_in_block = 0;
-                    let mut i_right_broadcast = 0;
-                    rhs[o_r1..o_r2]
-                        .iter()
-                        .map(|&r| {
-                            let l = unsafe { lhs.get_unchecked(i_in_block + ob.start) };
-                            i_right_broadcast += 1;
-                            if i_right_broadcast >= ob.right_broadcast {
-                                i_in_block += 1;
-                                i_right_broadcast = 0;
-                            }
-                            if i_in_block >= ob.len {
-                                i_in_block = 0
-                            }
-                            f(*l, r)
-                        })
-                        .collect()
-                }
-                None => lhs_l
-                    .strided_index()
-                    .zip(rhs_l.strided_index())
-                    .map(|(lhs_i, rhs_i)| f(lhs[lhs_i], rhs[rhs_i]))
-                    .collect(),
-            }
-        }
-        _ => lhs_l
-            .strided_index()
-            .zip(rhs_l.strided_index())
-            .map(|(lhs_i, rhs_i)| f(lhs[lhs_i], rhs[rhs_i]))
-            .collect(),
-    }
-}
-
-// Similar to binary_map but with vectorized variants.
-pub fn binary_map_vec<T: Copy, F: FnMut(T, T) -> T, FV: FnMut(&[T], &[T], &mut [T])>(
-    lhs_l: &Layout,
-    rhs_l: &Layout,
-    lhs: &[T],
-    rhs: &[T],
-    mut f: F,
-    mut f_vec: FV,
-) -> Vec<T> {
-    let el_count = lhs_l.shape().elem_count();
-    match (lhs_l.contiguous_offsets(), rhs_l.contiguous_offsets()) {
-        (Some((o_l1, o_l2)), Some((o_r1, o_r2))) => {
-            let mut ys: Vec<T> = Vec::with_capacity(el_count);
-            let ys_to_set = ys.spare_capacity_mut();
-            let ys_to_set = unsafe { std::mem::transmute::<_, &mut [T]>(ys_to_set) };
-            f_vec(&lhs[o_l1..o_l2], &rhs[o_r1..o_r2], ys_to_set);
-            // SAFETY: values are all set by f_vec.
-            unsafe { ys.set_len(el_count) };
-            ys
-        }
-        (Some((o_l1, o_l2)), None) => match rhs_l.offsets_b() {
-            Some(ob) if ob.right_broadcast == 1 => {
-                let rhs = &rhs[ob.start..ob.start + ob.len];
-                let mut ys: Vec<T> = Vec::with_capacity(el_count);
-                let ys_to_set = ys.spare_capacity_mut();
-                let ys_to_set = unsafe { std::mem::transmute::<_, &mut [T]>(ys_to_set) };
-                let mut dst_i = 0;
-                for src_i in (o_l1..o_l2).step_by(ob.len) {
-                    f_vec(
-                        &lhs[src_i..src_i + ob.len],
-                        rhs,
-                        &mut ys_to_set[dst_i..dst_i + ob.len],
-                    );
-                    dst_i += ob.len;
-                }
-                // SAFETY: values are all set by f_vec.
-                unsafe { ys.set_len(el_count) };
-                ys
-            }
-            Some(ob) => {
-                let rhs = &rhs[ob.start..ob.start + ob.len];
-                let mut ys = lhs[o_l1..o_l2].to_vec();
-                for idx_l in 0..ob.left_broadcast {
-                    let start = idx_l * ob.len * ob.right_broadcast;
-                    for (i, &r) in rhs.iter().enumerate() {
-                        let start = start + i * ob.right_broadcast;
-                        for v in ys[start..start + ob.right_broadcast].iter_mut() {
-                            *v = f(*v, r)
-                        }
-                    }
-                }
-                ys
-            }
-            None => lhs_l
-                .strided_index()
-                .zip(rhs_l.strided_index())
-                .map(|(lhs_i, rhs_i)| f(lhs[lhs_i], rhs[rhs_i]))
-                .collect(),
-        },
-        (None, Some((o_r1, o_r2))) => match lhs_l.offsets_b() {
-            Some(ob) if ob.right_broadcast == 1 => {
-                let lhs = &lhs[ob.start..ob.start + ob.len];
-                let mut ys: Vec<T> = Vec::with_capacity(el_count);
-                let ys_to_set = ys.spare_capacity_mut();
-                let ys_to_set = unsafe { std::mem::transmute::<_, &mut [T]>(ys_to_set) };
-                let mut dst_i = 0;
-                for src_i in (o_r1..o_r2).step_by(ob.len) {
-                    f_vec(
-                        lhs,
-                        &rhs[src_i..src_i + ob.len],
-                        &mut ys_to_set[dst_i..dst_i + ob.len],
-                    );
-                    dst_i += ob.len;
-                }
-                // SAFETY: values are all set by f_vec.
-                unsafe { ys.set_len(el_count) };
-                ys
-            }
-            Some(ob) => {
-                let lhs = &lhs[ob.start..ob.start + ob.len];
-                let mut ys = rhs[o_r1..o_r2].to_vec();
-                for idx_l in 0..ob.left_broadcast {
-                    let start = idx_l * ob.len * ob.right_broadcast;
-                    for (i, &l) in lhs.iter().enumerate() {
-                        let start = start + i * ob.right_broadcast;
-                        for v in ys[start..start + ob.right_broadcast].iter_mut() {
-                            *v = f(l, *v)
-                        }
-                    }
-                }
-                ys
-            }
-            None => lhs_l
-                .strided_index()
-                .zip(rhs_l.strided_index())
-                .map(|(lhs_i, rhs_i)| f(lhs[lhs_i], rhs[rhs_i]))
-                .collect(),
-        },
-        _ => lhs_l
-            .strided_index()
-            .zip(rhs_l.strided_index())
-            .map(|(lhs_i, rhs_i)| f(lhs[lhs_i], rhs[rhs_i]))
-            .collect(),
     }
 }
 
@@ -1022,6 +674,26 @@ impl<'a, I: IntDType> Map2 for IndexAdd<'a, I> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn copy2d_<T: Copy>(
+    src: &[T],
+    dst: &mut [T],
+    d1: usize,
+    d2: usize,
+    src_stride1: usize,
+    dst_stride1: usize,
+    src_offset: usize,
+    dst_offset: usize,
+) {
+    for i1 in 0..d1 {
+        let dst_idx = i1 * dst_stride1 + dst_offset;
+        let src_idx = i1 * src_stride1 + src_offset;
+        let dst = &mut dst[dst_idx..dst_idx + d2];
+        let src = &src[src_idx..src_idx + d2];
+        dst.copy_from_slice(src)
+    }
+}
+
 fn copy_strided_src_<T: Copy>(src: &[T], dst: &mut [T], dst_offset: usize, src_l: &Layout) {
     match src_l.strided_blocks() {
         crate::StridedBlocks::SingleBlock { start_offset, len } => {
@@ -1256,6 +928,34 @@ impl Map1 for Im2Col {
     }
 }
 
+struct Col2Im1D {
+    stride: usize,
+}
+
+impl Map1 for Col2Im1D {
+    fn f<T: WithDType>(&self, col: &[T], l: &Layout) -> Result<Vec<T>> {
+        let (b_size, l_in, c_out, k_size) = l.shape().dims4()?;
+        let stride = self.stride;
+        let l_out = (l_in - 1) * stride + k_size;
+        let mut im = vec![T::zero(); b_size * c_out * l_out];
+        let (dst_s0, dst_s1) = (c_out * l_out, l_out);
+        let (src_s0, src_s1, src_s2) = (c_out * k_size * l_in, c_out * k_size, k_size);
+        for l_in_i in 0..l_in {
+            for k_i in 0..k_size {
+                let l_out_i = l_in_i * stride + k_i;
+                for b_i in 0..b_size {
+                    for c_i in 0..c_out {
+                        let dst_idx = b_i * dst_s0 + c_i * dst_s1 + l_out_i;
+                        let src_idx = b_i * src_s0 + l_in_i * src_s1 + c_i * src_s2 + k_i;
+                        im[dst_idx] += col[src_idx]
+                    }
+                }
+            }
+        }
+        Ok(im)
+    }
+}
+
 struct ConvTranspose1D<'a>(&'a crate::conv::ParamsConvTranspose1D);
 
 impl<'a> Map2 for ConvTranspose1D<'a> {
@@ -1263,6 +963,7 @@ impl<'a> Map2 for ConvTranspose1D<'a> {
     fn f<T: WithDType>(&self, inp: &[T], inp_l: &Layout, k: &[T], k_l: &Layout) -> Result<Vec<T>> {
         let p = self.0;
         let inp = &inp[inp_l.start_offset()..];
+        let k = &k[k_l.start_offset()..];
         let (inp_s0, inp_s1, inp_s2) = crate::shape::dims3(inp_l.stride())?;
         let (k_s0, k_s1, k_s2) = crate::shape::dims3(k_l.stride())?;
         let l_out = p.l_out();
@@ -1514,6 +1215,30 @@ impl MatMul {
         }))
         .bt()
     }
+
+    fn ab_skip(&self, lhs_l: &Layout, rhs_l: &Layout) -> Result<(usize, usize)> {
+        let lhs_stride = lhs_l.stride();
+        let rhs_stride = rhs_l.stride();
+        let rank = lhs_stride.len();
+        let (_b, m, n, k) = self.0;
+        let a_skip: usize = match lhs_stride[..rank - 2] {
+            [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
+            [_, stride] if lhs_l.dims()[0] == 1 => stride,
+            [stride, _] if lhs_l.dims()[1] == 1 => stride,
+            [stride] => stride,
+            [] => m * k,
+            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous lhs"))?,
+        };
+        let b_skip: usize = match rhs_stride[..rank - 2] {
+            [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
+            [_, stride] if rhs_l.dims()[0] == 1 => stride,
+            [stride, _] if rhs_l.dims()[1] == 1 => stride,
+            [stride] => stride,
+            [] => n * k,
+            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?,
+        };
+        Ok((a_skip, b_skip))
+    }
 }
 
 impl Map2 for MatMul {
@@ -1547,18 +1272,7 @@ impl Map2 for MatMul {
         let rhs_cs = rhs_stride[rank - 1];
         let rhs_rs = rhs_stride[rank - 2];
 
-        let a_skip: usize = match lhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => m * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous lhs"))?,
-        };
-        let b_skip: usize = match rhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => n * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?,
-        };
+        let (a_skip, b_skip) = self.ab_skip(lhs_l, rhs_l)?;
         let c_skip: usize = m * n;
 
         let dst_shape: Shape = (m, n).into();
@@ -1618,20 +1332,8 @@ impl Map2 for MatMul {
 
         let lhs_stride = lhs_l.stride();
         let rhs_stride = rhs_l.stride();
-        let rank = lhs_stride.len();
 
-        let a_skip: usize = match lhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => m * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous lhs"))?,
-        };
-        let b_skip: usize = match rhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => n * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?,
-        };
+        let (a_skip, b_skip) = self.ab_skip(lhs_l, rhs_l)?;
         let c_skip: usize = m * n;
 
         let rhs_m1 = rhs_stride[rhs_stride.len() - 1];
@@ -1639,7 +1341,7 @@ impl Map2 for MatMul {
         let lhs_m1 = lhs_stride[lhs_stride.len() - 1];
         let lhs_m2 = lhs_stride[lhs_stride.len() - 2];
 
-        let (lda, transa) = if rhs_m1 == 1 && rhs_m2 == n {
+        let (lda, transa) = if (rhs_m1 == 1 || n == 1) && (rhs_m2 == n || k == 1) {
             (n as i32, b'N')
         } else if rhs_m1 == k && rhs_m2 == 1 {
             (k as i32, b'T')
@@ -1647,7 +1349,7 @@ impl Map2 for MatMul {
             Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?
         };
         // The b tensor has dims batching, m, k (lhs)
-        let (ldb, transb) = if lhs_m1 == 1 && lhs_m2 == k {
+        let (ldb, transb) = if (lhs_m1 == 1 || k == 1) && (lhs_m2 == k || m == 1) {
             (k as i32, b'N')
         } else if lhs_m1 == m && lhs_m2 == 1 {
             (m as i32, b'T')
@@ -1721,20 +1423,8 @@ impl Map2 for MatMul {
 
         let lhs_stride = lhs_l.stride();
         let rhs_stride = rhs_l.stride();
-        let rank = lhs_stride.len();
 
-        let a_skip: usize = match lhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => m * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous lhs"))?,
-        };
-        let b_skip: usize = match rhs_stride[..rank - 2] {
-            [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
-            [stride] => stride,
-            [] => n * k,
-            _ => Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?,
-        };
+        let (a_skip, b_skip) = self.ab_skip(lhs_l, rhs_l)?;
         let c_skip: usize = m * n;
 
         let rhs_m1 = rhs_stride[rhs_stride.len() - 1];
@@ -1742,7 +1432,7 @@ impl Map2 for MatMul {
         let lhs_m1 = lhs_stride[lhs_stride.len() - 1];
         let lhs_m2 = lhs_stride[lhs_stride.len() - 2];
 
-        let (lda, transa) = if rhs_m1 == 1 && rhs_m2 == n {
+        let (lda, transa) = if (rhs_m1 == 1 || n == 1) && (rhs_m2 == n || k == 1) {
             (n as i32, b'N')
         } else if rhs_m1 == k && rhs_m2 == 1 {
             (k as i32, b'T')
@@ -1750,7 +1440,7 @@ impl Map2 for MatMul {
             Err(self.striding_error(lhs_l, rhs_l, "non-contiguous rhs"))?
         };
         // The b tensor has dims batching, m, k (lhs)
-        let (ldb, transb) = if lhs_m1 == 1 && lhs_m2 == k {
+        let (ldb, transb) = if (lhs_m1 == 1 || k == 1) && (lhs_m2 == k || m == 1) {
             (k as i32, b'N')
         } else if lhs_m1 == m && lhs_m2 == 1 {
             (m as i32, b'T')
@@ -2422,6 +2112,48 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    fn copy2d(
+        &self,
+        dst: &mut Self,
+        d1: usize,
+        d2: usize,
+        src_s: usize,
+        dst_s: usize,
+        src_o: usize,
+        dst_o: usize,
+    ) -> Result<()> {
+        match (self, dst) {
+            (Self::U8(src), Self::U8(dst)) => copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o),
+            (Self::U32(src), Self::U32(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::I64(src), Self::I64(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::BF16(src), Self::BF16(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::F16(src), Self::F16(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::F32(src), Self::F32(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (Self::F64(src), Self::F64(dst)) => {
+                copy2d_(src, dst, d1, d2, src_s, dst_s, src_o, dst_o)
+            }
+            (_, dst) => {
+                return Err(Error::DTypeMismatchBinaryOp {
+                    lhs: self.dtype(),
+                    rhs: dst.dtype(),
+                    op: "copy2d",
+                }
+                .bt());
+            }
+        }
+        Ok(())
+    }
+
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
         match (self, dst) {
             (Self::U8(src), Self::U8(dst)) => copy_strided_src_(src, dst, dst_offset, src_l),
@@ -2490,7 +2222,10 @@ impl BackendStorage for CpuStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         } else {
             // Make the kernel contiguous if not already the case.
-            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            let mut kernel_c = unsafe {
+                self.device()
+                    .alloc_uninit(kernel_l.shape(), kernel.dtype())?
+            };
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
             let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
                 .transpose(1, 2)?
@@ -2498,7 +2233,7 @@ impl BackendStorage for CpuStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         };
         let res_l = Layout::contiguous((b, l_out, params.c_out)).transpose(1, 2)?;
-        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        let mut res_t = unsafe { self.device().alloc_uninit(res_l.shape(), res.dtype())? };
         res.copy_strided_src(&mut res_t, 0, &res_l)?;
         Ok(res_t)
     }
@@ -2510,7 +2245,52 @@ impl BackendStorage for CpuStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConvTranspose1D,
     ) -> Result<Self> {
-        ConvTranspose1D(params).map(self, l, kernel, kernel_l)
+        let can_use_col2im = kernel_l.is_contiguous()
+            && params.dilation == 1
+            && params.padding == 0
+            && params.output_padding == 0;
+        if USE_COL2IM_CONV1D_TR && can_use_col2im {
+            let (b_size, c_in, l_in) = l.shape().dims3()?;
+            let (c_in2, c_out, k_size) = kernel_l.shape().dims3()?;
+            if !kernel_l.is_contiguous() {
+                crate::bail!(
+                    "convtr1d: the second argument (kernel) has to be contiguous {kernel_l:?}"
+                )
+            }
+            if c_in != c_in2 {
+                crate::bail!(
+                    "convtr1d: shape mismatch on c_in {:?} {:?}",
+                    l.shape(),
+                    kernel_l.shape()
+                )
+            }
+            let col = {
+                // This merges the last two dimensions of the kernel together.
+                let kernel_l_mm = Layout::new(
+                    (b_size, c_in, k_size * c_out).into(),
+                    vec![0, k_size * c_out, 1],
+                    kernel_l.start_offset(),
+                );
+                self.matmul(
+                    kernel,
+                    (
+                        b_size,
+                        /* m */ l_in,
+                        /* n */ c_out * k_size,
+                        /* k */ c_in,
+                    ),
+                    &l.transpose(1, 2)?,
+                    &kernel_l_mm,
+                )?
+            };
+            let col_l = Layout::contiguous((b_size, l_in, c_out, k_size));
+            Col2Im1D {
+                stride: params.stride,
+            }
+            .map(&col, &col_l)
+        } else {
+            ConvTranspose1D(params).map(self, l, kernel, kernel_l)
+        }
     }
 
     fn conv2d(
@@ -2544,7 +2324,10 @@ impl BackendStorage for CpuStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         } else {
             // Make the kernel contiguous if not already the case.
-            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            let mut kernel_c = unsafe {
+                self.device()
+                    .alloc_uninit(kernel_l.shape(), kernel.dtype())?
+            };
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
             let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
                 .transpose(1, 2)?
@@ -2554,7 +2337,7 @@ impl BackendStorage for CpuStorage {
         let res_l = Layout::contiguous((b, h_out, w_out, params.c_out))
             .transpose(1, 2)?
             .transpose(1, 3)?;
-        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        let mut res_t = unsafe { self.device().alloc_uninit(res_l.shape(), res.dtype())? };
         res.copy_strided_src(&mut res_t, 0, &res_l)?;
         Ok(res_t)
     }
@@ -2574,7 +2357,7 @@ impl BackendStorage for CpuStorage {
             Self::U8(ids) => IndexSelect { ids, ids_l, dim }.map(self, l),
             Self::U32(ids) => IndexSelect { ids, ids_l, dim }.map(self, l),
             Self::I64(ids) => IndexSelect { ids, ids_l, dim }.map(self, l),
-            _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "index-select")),
+            _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "index-select").bt()),
         }
     }
 
@@ -2583,7 +2366,7 @@ impl BackendStorage for CpuStorage {
             Self::U8(ids) => Gather { ids, ids_l, dim }.map(self, l),
             Self::U32(ids) => Gather { ids, ids_l, dim }.map(self, l),
             Self::I64(ids) => Gather { ids, ids_l, dim }.map(self, l),
-            _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "gather")),
+            _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "gather").bt()),
         }
     }
 
@@ -2600,7 +2383,7 @@ impl BackendStorage for CpuStorage {
             Self::U8(ids) => ScatterAdd { ids, ids_l, dim }.map(self, l, src, src_l),
             Self::U32(ids) => ScatterAdd { ids, ids_l, dim }.map(self, l, src, src_l),
             Self::I64(ids) => ScatterAdd { ids, ids_l, dim }.map(self, l, src, src_l),
-            _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "scatter-add")),
+            _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "scatter-add").bt()),
         }
     }
 
@@ -2673,8 +2456,16 @@ impl BackendDevice for CpuDevice {
         true
     }
 
+    fn storage_from_slice<T: crate::WithDType>(&self, s: &[T]) -> Result<Self::Storage> {
+        Ok(T::to_cpu_storage(s))
+    }
+
     fn storage_from_cpu_storage(&self, s: &CpuStorage) -> Result<Self::Storage> {
         Ok(s.clone())
+    }
+
+    fn storage_from_cpu_storage_owned(&self, s: CpuStorage) -> Result<Self::Storage> {
+        Ok(s)
     }
 
     fn new(_: usize) -> Result<Self> {
@@ -2778,6 +2569,53 @@ impl BackendDevice for CpuDevice {
         }
     }
 
+    #[allow(clippy::uninit_vec)]
+    unsafe fn alloc_uninit(&self, shape: &Shape, dtype: DType) -> Result<CpuStorage> {
+        let elem_count = shape.elem_count();
+        // The code below is highly unsafe but hopefully not directly unsound as we only consider
+        // types that are Copy, not Drop, and for which all bit patterns are proper values.
+        // It's still pretty risky, see the following for more details:
+        // https://github.com/rust-lang/rust-clippy/issues/4483
+        let storage = match dtype {
+            DType::U8 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::U8(v)
+            }
+            DType::U32 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::U32(v)
+            }
+            DType::I64 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::I64(v)
+            }
+            DType::BF16 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::BF16(v)
+            }
+            DType::F16 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::F16(v)
+            }
+            DType::F32 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::F32(v)
+            }
+            DType::F64 => {
+                let mut v = Vec::with_capacity(elem_count);
+                v.set_len(elem_count);
+                CpuStorage::F64(v)
+            }
+        };
+        Ok(storage)
+    }
+
     fn ones_impl(&self, shape: &Shape, dtype: DType) -> Result<CpuStorage> {
         let elem_count = shape.elem_count();
         let storage = match dtype {
@@ -2804,6 +2642,10 @@ impl BackendDevice for CpuDevice {
             DType::F64 => CpuStorage::F64(vec![0f64; elem_count]),
         };
         Ok(storage)
+    }
+
+    fn synchronize(&self) -> Result<()> {
+        Ok(())
     }
 }
 
